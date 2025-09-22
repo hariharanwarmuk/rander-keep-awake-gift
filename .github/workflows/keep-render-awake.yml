@@ -1,11 +1,11 @@
-name: Keep Render Awake (5m)
+name: Keep Render Awake (staggered ~2–3m)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes (UTC)
-  workflow_dispatch:        # allow manual run
+    - cron: "*/5 * * * *"     # 00,05,10,15,...
+    - cron: "2-59/5 * * * *"  # 02,07,12,17,... (staggered)
+  workflow_dispatch:           # allow manual run from Actions
 
-# Avoid overlapping runs
 concurrency:
   group: keep-render-awake
   cancel-in-progress: false
@@ -18,20 +18,38 @@ jobs:
     timeout-minutes: 5
     env:
       PING_URL: https://gifts-api.onrender.com/health
+
     steps:
       - name: Show UTC time
         run: date -u
 
-      - name: Ping Render health endpoint (3 retries)
+      - name: Warm + measure (timed, 3 retries)
         run: |
-          set -euxo pipefail
+          set -euo pipefail
+
+          attempt() {
+            echo "Attempt $1 at $(date -u)"
+            # First hit (warm or keep warm)
+            curl -sSfL --max-time 20 -o /tmp/out.json "$PING_URL" \
+              --write-out $'http_code=%{http_code}\nnamelookup=%{time_namelookup}\nconnect=%{time_connect}\nappconnect=%{time_appconnect}\nstarttransfer=%{time_starttransfer}\ntotal=%{time_total}\n'
+            echo "Body: $(cat /tmp/out.json)"
+
+            # Second hit 20s later (verifies it's warm)
+            sleep 20
+            echo "Verify at $(date -u)"
+            curl -sSfL --max-time 20 -o /tmp/out2.json "$PING_URL" \
+              --write-out $'verify_http_code=%{http_code}\nverify_total=%{time_total}\n'
+            echo "Verify body: $(cat /tmp/out2.json)"
+          }
+
           for i in 1 2 3; do
-            if curl -sfL --max-time 10 "$PING_URL"; then
-              echo "Ping succeeded on attempt $i"
+            if attempt "$i"; then
+              echo "✅ Keep-alive successful on attempt $i"
               exit 0
             fi
-            echo "Attempt $i failed; sleeping before retry..."
+            echo "Attempt $i failed; retrying in 20s..."
             sleep 20
           done
-          echo "All attempts failed"
+
+          echo "❌ All attempts failed"
           exit 1
